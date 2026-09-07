@@ -31,14 +31,12 @@ commands, paths, identifiers, quotations, uncertainty, and necessary detail.
 
 ## Build, Test, and Development Commands
 
-Keep development dependencies inside the version-pinned container. Do not install the JDK, Android
-SDK, Node, Python tools, Pebble Tool, or Pebble SDK into the developer's user profile. Docker is the
-preferred static-development engine; rootless Podman is a supported Docker-compatible fallback.
-The wrapper selects Docker when available, otherwise Podman. Set `DEV_CONTAINER_ENGINE=docker` or
-`DEV_CONTAINER_ENGINE=podman` to choose explicitly.
+Use [docs/testing.md](docs/testing.md) for changed-area commands, test selection, and completion
+checks. Keep JDK, Android SDK, Node, Python tools, Pebble Tool, and Pebble SDK inside the
+version-pinned container; never install them in the developer's user profile. Docker is preferred;
+rootless Podman is the fallback. Select explicitly with `DEV_CONTAINER_ENGINE=docker` or `podman`.
 
 ```sh
-./tools/bump-version 0.2.4
 ./tools/podman-test doctor static
 ./tools/podman-test build-static
 ./tools/podman-test dev bash
@@ -47,58 +45,29 @@ The wrapper selects Docker when available, otherwise Podman. Set `DEV_CONTAINER_
 ./tools/podman-test release-check
 ```
 
-`build-static` builds only the development image and may use the network; `--refresh` explicitly
-refreshes its digest-pinned base reference. `static` automatically builds that image when missing,
-then runs Gradle/JVM, Android assembly, Android-test compilation, JavaScript, Python, shell, C
-sanitizer, protocol, Pebble build, and PBW checks inside it. `documentation` validates committed
-screenshots without regenerating them. `release-check` assembles the release APK and verifies its
-application ID, API 24 minimum, and absence of `DebugStatusProvider`. Generated outputs go under
-`build/`, `android/app/build/`, and `watchapp/build/`; the APK is written to
-`android/app/build/outputs/apk/debug/trackglance-bridge-debug.apk`. Run
-`./tools/podman-test dev ./gradlew regenerateDocumentationScreenshots` only when intentionally
-updating tracked images. Use `dev bash` for an interactive container shell or prefix any focused
-repository command with `./tools/podman-test dev`; do not reproduce its toolchain on the host.
+`build-static --refresh` explicitly refreshes the digest-pinned base. `static` builds a missing
+image automatically. Generated outputs belong in `build/`, `android/app/build/`, and
+`watchapp/build/`; the debug APK is
+`android/app/build/outputs/apk/debug/trackglance-bridge-debug.apk`. Documentation checks must not
+regenerate tracked screenshots; intentional updates use
+`./tools/podman-test dev ./gradlew regenerateDocumentationScreenshots`.
 
-Heavy acceptance remains separate from the development container. It supports Docker or rootless
-Podman with `crun`, KVM, the pinned emulator stack, and the pinned Locus fixture. Never copy the APK
-into an image, repository, Actions artifact, or persistent cache:
+[docs/podman-testing.md](docs/podman-testing.md) owns acceptance setup, private fixtures, image
+publishing, and cleanup. Acceptance needs KVM and the pinned emulator/Locus stack. Keep the regular
+Locus Map 4 Google Play APK in the absolute private directory passed to `--locus-apks`; never copy
+it into an image, repository, Actions artifact, or persistent cache. Do not use Amazon/no-Google-
+services builds, or GooglePlayAfa unless testing all-files access specifically.
 
-```sh
-./tools/podman-test doctor acceptance
-./tools/podman-test build
-./tools/podman-test bootstrap --locus-apks /absolute/private/path
-./tools/podman-test acceptance --locus-apks /absolute/private/path
-./tools/podman-test acceptance-suite --locus-apks /absolute/private/path
-```
+Published images use immutable GHCR digests in `tools/ci-images.env`. Update them only through the
+protected `Publish CI images` workflow, retain provenance/SBOM attestations and keyless signature
+verification, and compare source versus published acceptance before adopting new pins. Published
+images must never contain Locus, TrackGlance APK/PBW files, signing material, emulator state, or
+persistent caches. Hosted acceptance downloads and validates the public fixture in `$RUNNER_TEMP`,
+creates fresh golden state, and runs Android, Emery, and Gabbro; preserve this protected gate.
 
-The required pull-request GitHub-hosted path uses Docker and the signed, digest-pinned prebuilt
-acceptance runner and emulator from GHCR. It downloads the official public fixture with
-`tools/download-locus-apk` into `$RUNNER_TEMP`, validates every pin in
-`tools/locus-test-apk.properties`, creates fresh golden state, builds the current TrackGlance
-artifacts, and runs Android, Emery, and Gabbro acceptance once. Manual dispatch can select a second
-Emery/Gabbro pass as a soak test or compare source and published provisioning. The local
-`acceptance-suite` command reuses the validated golden state by default. Use `--published --cleanup`
-to reproduce the required hosted provisioning path; reserve the slower `--fresh --cleanup` source
-build for CI-image changes and source-versus-published comparisons.
-
-Published CI images are immutable GHCR digest references from `tools/ci-images.env`. Update them
-only from the protected `Publish CI images` workflow, retain its provenance/SBOM attestations and
-keyless signature verification, and run the source-versus-published acceptance comparison before
-making a new image set authoritative. Never add Locus, TrackGlance APK/PBW files, signing material,
-emulator state, or persistent caches to a published image.
-
-The API 32 image includes Google Play services, so use the regular Locus Map 4 Google Play APK for
-acceptance. Do not use the `GooglePlayAfa` all-files-access build unless that permission is the
-specific subject of a test, and do not use the Amazon/no-Google-services build in this emulator.
-Keep the selected APK set in the absolute private directory passed to the wrapper.
-
-The opt-in Locus test creates and saves a short recording. Never run it when a user recording is
-active:
-
-```sh
-./tools/podman-test dev bash -c 'ANDROID_SERIAL=arc:5555 ./gradlew :android:app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.runLocusIntegration=true'
-```
+[docs/development.md](docs/development.md) owns ARCVM/hardware and real-device commands. The opt-in
+Locus contract test is non-mutating: it validates numeric profile identities and rejection of
+obsolete Start command `1`. Never run it when a user recording is active.
 
 ## Coding Style & Naming Conventions
 

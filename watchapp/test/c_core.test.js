@@ -7,8 +7,19 @@ const os = require('os');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
+const groups = ['maintenance', 'steps', 'metrics-localization', 'persistence-boundaries',
+  'persistence-recovery', 'configuration-parsing', 'transfers-ordering', 'configuration-storage'];
+const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === '--list') {
+  process.stdout.write(groups.join('\n') + '\n');
+  process.exit(0);
+}
+if (args.length > 1 || (args.length === 1 && !groups.includes(args[0]))) {
+  process.stderr.write(`Unknown C test group: ${args.join(' ')}. Choose: ${groups.join(', ')}\n`);
+  process.exit(1);
+}
+const selected = args.length ? args : groups;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'locus-watch-core-'));
-const executable = path.join(temporary, 'watch_core_test');
 const sanitizerFlags = [
   '-fsanitize=address,undefined',
   '-fno-sanitize-recover=undefined',
@@ -22,7 +33,13 @@ const commonFlags = [
 ];
 
 try {
-  const productionSources = ['watch_config.c', 'watch_state.c', 'watch_maintenance.c', 'watch_maintenance_timer.c', 'watch_outbound_retry.c', 'watch_step_state.c', 'persistent_blob.c', 'i18n.c', 'ui_metrics.c'];
+  const sanitizerEnvironment = {
+    ...process.env,
+    ASAN_OPTIONS: 'detect_leaks=1:halt_on_error=1',
+    UBSAN_OPTIONS: 'halt_on_error=1:print_stacktrace=1',
+  };
+
+  const productionSources = ['watch_config.c', 'watch_config_storage.c', 'watch_state.c', 'watch_maintenance.c', 'watch_maintenance_timer.c', 'watch_outbound_retry.c', 'watch_step_state.c', 'persistent_blob.c', 'i18n.c', 'ui_metrics.c'];
   const objects = [];
   productionSources.forEach(source => {
     const object = path.join(temporary, `${source}.o`);
@@ -35,29 +52,28 @@ try {
     objects.push(object);
   });
 
-  const testObject = path.join(temporary, 'watch_core_test.o');
-  const compileTest = childProcess.spawnSync('cc', [
-    ...commonFlags,
-    '-c', path.join(root, 'test/watch_core_test.c'), '-o', testObject,
-  ], {encoding: 'utf8'});
-  assert.strictEqual(compileTest.status, 0, compileTest.stderr || compileTest.stdout);
+  for (const group of selected) {
+    const executable = path.join(temporary, group);
+    const testObject = path.join(temporary, `${group}.o`);
+    const compileTest = childProcess.spawnSync('cc', [
+      ...commonFlags,
+      '-c', path.join(root, `test/core_${group.replaceAll('-', '_')}_test.c`), '-o', testObject,
+    ], {encoding: 'utf8'});
+    assert.strictEqual(compileTest.status, 0, compileTest.stderr || compileTest.stdout);
 
-  const link = childProcess.spawnSync('cc', [
-    ...sanitizerFlags,
-    testObject, ...objects, '-o', executable,
-  ], {encoding: 'utf8'});
-  assert.strictEqual(link.status, 0, link.stderr || link.stdout);
+    const link = childProcess.spawnSync('cc', [
+      ...commonFlags,
+      path.join(root, 'test/core_test_support.c'), testObject, ...objects, '-o', executable,
+    ], {encoding: 'utf8'});
+    assert.strictEqual(link.status, 0, link.stderr || link.stdout);
 
-  const sanitizerEnvironment = {
-    ...process.env,
-    ASAN_OPTIONS: 'detect_leaks=1:halt_on_error=1',
-    UBSAN_OPTIONS: 'halt_on_error=1:print_stacktrace=1',
-  };
-  const run = childProcess.spawnSync(executable, [], {
-    encoding: 'utf8',
-    env: sanitizerEnvironment,
-  });
-  assert.strictEqual(run.status, 0, run.stderr || run.stdout);
+    const run = childProcess.spawnSync(executable, [], {
+      encoding: 'utf8',
+      env: sanitizerEnvironment,
+    });
+    assert.strictEqual(run.status, 0, `[${group}] ${run.stderr || run.stdout}`);
+    process.stdout.write(run.stderr);
+  }
 
   const undefinedBehaviorProbe = path.join(temporary, 'undefined_behavior_probe');
   const compileProbe = childProcess.spawnSync('cc', [

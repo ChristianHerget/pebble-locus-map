@@ -6,66 +6,84 @@ import org.junit.Test
 class SnapshotFormatterTest {
     @Test
     fun distanceThresholdsAndPrecisionMatchLocusMediumFormatting() {
-        assertDistance(
-            999.9f,
-            BridgeProtocol.LengthFormat.METRES_KILOMETRES,
-            1000,
-            BridgeProtocol.FormatCode.M_0,
-        )
-        assertDistance(
-            1000f,
-            BridgeProtocol.LengthFormat.METRES_KILOMETRES,
-            10,
-            BridgeProtocol.FormatCode.KM_1,
-        )
-        assertDistance(
-            99_999f,
-            BridgeProtocol.LengthFormat.METRES_KILOMETRES,
-            1000,
-            BridgeProtocol.FormatCode.KM_1,
-        )
-        assertDistance(
-            100_000f,
-            BridgeProtocol.LengthFormat.METRES_KILOMETRES,
-            100,
-            BridgeProtocol.FormatCode.KM_0,
-        )
-        assertDistance(
-            304.7f,
-            BridgeProtocol.LengthFormat.FEET_MILES,
-            1000,
-            BridgeProtocol.FormatCode.FT_0,
-        )
-        assertDistance(
-            305f,
-            BridgeProtocol.LengthFormat.FEET_MILES,
-            19,
-            BridgeProtocol.FormatCode.MI_2,
-        )
-        assertDistance(
-            914.3f,
-            BridgeProtocol.LengthFormat.YARDS_MILES,
-            1000,
-            BridgeProtocol.FormatCode.YD_0,
-        )
-        assertDistance(
-            915f,
-            BridgeProtocol.LengthFormat.YARDS_MILES,
-            57,
-            BridgeProtocol.FormatCode.MI_2,
-        )
-        assertDistance(
-            1852f,
-            BridgeProtocol.LengthFormat.METRES_NAUTICAL_MILES,
-            1852,
-            BridgeProtocol.FormatCode.M_0,
-        )
-        assertDistance(
-            1852.1f,
-            BridgeProtocol.LengthFormat.METRES_NAUTICAL_MILES,
-            10,
-            BridgeProtocol.FormatCode.NMI_1,
-        )
+        val cases =
+            listOf(
+                DistanceCase(
+                    "below kilometre",
+                    999.9f,
+                    BridgeProtocol.LengthFormat.METRES_KILOMETRES,
+                    DisplayValue(1000, BridgeProtocol.FormatCode.M_0),
+                ),
+                DistanceCase(
+                    "at kilometre",
+                    1000f,
+                    BridgeProtocol.LengthFormat.METRES_KILOMETRES,
+                    DisplayValue(10, BridgeProtocol.FormatCode.KM_1),
+                ),
+                DistanceCase(
+                    "below whole kilometres",
+                    99_999f,
+                    BridgeProtocol.LengthFormat.METRES_KILOMETRES,
+                    DisplayValue(1000, BridgeProtocol.FormatCode.KM_1),
+                ),
+                DistanceCase(
+                    "at whole kilometres",
+                    100_000f,
+                    BridgeProtocol.LengthFormat.METRES_KILOMETRES,
+                    DisplayValue(100, BridgeProtocol.FormatCode.KM_0),
+                ),
+                DistanceCase(
+                    "below feet to miles",
+                    304.7f,
+                    BridgeProtocol.LengthFormat.FEET_MILES,
+                    DisplayValue(1000, BridgeProtocol.FormatCode.FT_0),
+                ),
+                DistanceCase(
+                    "above feet to miles",
+                    305f,
+                    BridgeProtocol.LengthFormat.FEET_MILES,
+                    DisplayValue(19, BridgeProtocol.FormatCode.MI_2),
+                ),
+                DistanceCase(
+                    "below yards to miles",
+                    914.3f,
+                    BridgeProtocol.LengthFormat.YARDS_MILES,
+                    DisplayValue(1000, BridgeProtocol.FormatCode.YD_0),
+                ),
+                DistanceCase(
+                    "above yards to miles",
+                    915f,
+                    BridgeProtocol.LengthFormat.YARDS_MILES,
+                    DisplayValue(57, BridgeProtocol.FormatCode.MI_2),
+                ),
+                DistanceCase(
+                    "at nautical boundary",
+                    1852f,
+                    BridgeProtocol.LengthFormat.METRES_NAUTICAL_MILES,
+                    DisplayValue(1852, BridgeProtocol.FormatCode.M_0),
+                ),
+                DistanceCase(
+                    "above nautical boundary",
+                    1852.1f,
+                    BridgeProtocol.LengthFormat.METRES_NAUTICAL_MILES,
+                    DisplayValue(10, BridgeProtocol.FormatCode.NMI_1),
+                ),
+            )
+        cases.forEach { case ->
+            val actual =
+                format(
+                        distanceMetres = case.metres,
+                        unitPreferences =
+                            BridgeProtocol.UnitPreferences.METRIC.copy(length = case.preference),
+                    )
+                    .distance
+            assertEquals(
+                "${case.name}: metres=${case.metres}, preference=${case.preference}, " +
+                    "expected=${case.expected}, actual=$actual",
+                case.expected,
+                actual,
+            )
+        }
     }
 
     @Test
@@ -136,27 +154,40 @@ class SnapshotFormatterTest {
 
     @Test
     fun speedPrecisionChangesOnlyAboveOneHundred() {
-        val belowBoundary = format(currentSpeedMps = 25f).currentSpeed
-        assertEquals(BridgeProtocol.FormatCode.KPH_1, belowBoundary.format)
-        val above = format(currentSpeedMps = 28f).currentSpeed
-        assertEquals(DisplayValue(101, BridgeProtocol.FormatCode.KPH_0), above)
+        data class SpeedCase(
+            val name: String,
+            val metresPerSecond: Float,
+            val expected: DisplayValue,
+        )
+        val cases =
+            listOf(
+                SpeedCase(
+                    "below whole speed precision",
+                    25f,
+                    DisplayValue(900, BridgeProtocol.FormatCode.KPH_1),
+                ),
+                SpeedCase(
+                    "above whole speed precision",
+                    28f,
+                    DisplayValue(101, BridgeProtocol.FormatCode.KPH_0),
+                ),
+            )
+        cases.forEach { case ->
+            val actual = format(currentSpeedMps = case.metresPerSecond).currentSpeed
+            assertEquals(
+                "${case.name}: metresPerSecond=${case.metresPerSecond}, expected=${case.expected}, actual=$actual",
+                case.expected,
+                actual,
+            )
+        }
     }
 
-    private fun assertDistance(
-        metres: Float,
-        preference: BridgeProtocol.LengthFormat,
-        mantissa: Int,
-        code: BridgeProtocol.FormatCode,
-    ) =
-        assertEquals(
-            DisplayValue(mantissa, code),
-            format(
-                    distanceMetres = metres,
-                    unitPreferences =
-                        BridgeProtocol.UnitPreferences.METRIC.copy(length = preference),
-                )
-                .distance,
-        )
+    private data class DistanceCase(
+        val name: String,
+        val metres: Float,
+        val preference: BridgeProtocol.LengthFormat,
+        val expected: DisplayValue,
+    )
 
     private fun format(
         distanceMetres: Float? = null,

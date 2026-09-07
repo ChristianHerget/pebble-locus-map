@@ -1,5 +1,7 @@
 # Development setup
 
+For focused test selection and completion checks, see [Focused testing](testing.md).
+
 ## Preparing a version bump
 
 Run `./tools/bump-version MAJOR.MINOR.PATCH` once. It verifies that the existing release markers
@@ -197,23 +199,12 @@ End-to-end acceptance requires snapshots and all controls to round-trip through 
 the Android bridge, and Locus. Physical Bluetooth, GPS, battery, and background-restriction tests
 remain a later hardware smoke test.
 
-## Locus integration tests
+## Verification and screenshots
 
-Normal verification compiles the instrumentation test but does not change Locus data:
-
-```sh
-./tools/podman-test static
-./tools/podman-test documentation
-./tools/podman-test release-check
-```
-
-`verifyPebbleTargets` checks stack/scheduler invariants plus cross-language protocol and packaging
-metadata without launching emulators, installing packages, or changing tracked files.
-`documentation` validates the committed screenshots without regenerating them.
-`release-check` assembles the final release APK with the pinned Android SDK tools and enforces its
-application ID, version, minimum and target SDK, permission declarations, backup/debug/cleartext
-attributes, and exported-component allowlist. The unsigned local build and signed release workflow
-use the same compiled-manifest policy; signed builds additionally verify the release certificate.
+Use [Focused testing](testing.md) for routine checks, native test filters, and completion
+requirements. The release check and signed release workflow share the compiled-manifest policy:
+application ID, version, SDK levels, permissions, backup/debug/cleartext attributes, and exported
+components are checked; signed builds also verify the release certificate.
 
 Before documentation deployment, build the manual and visually review **Getting Started**,
 **Features**, **Android Bridge Settings**, and **User Guide** with light and dark browser themes at
@@ -230,52 +221,24 @@ With a disposable Android emulator available through `adb`, run `./tools/podman-
 regenerateAndroidBridgeScreenshots` to refresh the native Bridge light/dark images. The task installs
 the debug APK, fixes font scale and orientation during capture, and restores the device settings
 afterward.
-`verify:pbw` must run after `pebble build`; it inspects the generated archive rather than assuming
-package declarations were honored.
 
-The independent public static entry point is `./tools/podman-test static`. It builds or uses the
-development image and never checks for KVM, emulator
-images, Locus APKs, golden state, or acceptance-host RAM/disk. Dependency updates should be
-intentional and reviewed:
+Dependency updates should be intentional and reviewed:
 
 ```sh
 ./tools/podman-test dev ./gradlew --write-locks --write-verification-metadata sha256 \
   verifyPebbleTargets :android:app:testDebugUnitTest :android:app:assembleDebug
 ```
 
-The first resolution may use the network; a populated cache can subsequently run the lightweight
-Gradle tasks with `--offline`. CI mirrors this split: public static checks and documentation are
-separate. Every pull request and every push to `main` also runs full KVM acceptance on an ephemeral GitHub-hosted Docker
-runner. The job verifies and pulls the signed, digest-pinned prebuilt GHCR runner and emulator,
-downloads the pinned public Locus fixture, creates fresh golden state, and tests the current
-TrackGlance build. The exact `main` push run certifies a tag build; CodeQL and dependency review
-remain protected pull-request gates and are not duplicated after merge. The same test stages run locally with the private fixture through
-`./tools/podman-test acceptance-suite --locus-apks
-/home/christian/.local/share/trackglance-acceptance/locus-apks`; this warm path preserves caches and
-the validated golden state for fast feedback. Use `--published --cleanup` to reproduce hosted
-provisioning locally, and reserve `--fresh --cleanup` for source-provisioning or image comparisons.
+The first resolution may use the network; populated caches can run Gradle tasks with `--offline`.
+For hosted acceptance, private fixture setup, warm/fresh provisioning, image publishing, and the
+interactive Emery/Gabbro lab, use [Containerized acceptance](podman-testing.md). The lab's browser
+dashboard remains bound to host loopback and uses disposable clones of validated golden state.
 
-For interactive work against the same validated golden state, start a disposable Emery or Gabbro
-lab and open `http://127.0.0.1:5173/`:
-
-```sh
-./tools/podman-test manual --platform emery \
-  --locus-apks /absolute/private/path
-```
-
-The page places the Android and Pebble displays together with watch buttons, Q/W/S/X and arrow-key
-controls, heart-rate and absolute-step inputs, readiness state, and named PNG captures. Captures and
-bounded shutdown diagnostics remain under the printed `build/podman/<run>-manual/` path. Press
-Ctrl-C to remove the cloned Android, watch, and runtime state without changing the golden volume.
-The dashboard remains bound to host loopback.
-Use `--platform gabbro` for Pebble Round 2. Missing-image errors require `build`; stale or missing
-golden provenance requires `clean`, `build`, and `bootstrap` with the same private Locus directory.
-The complete lifecycle and input limits are documented in
-[Interactive emulator lab](podman-testing.md#interactive-emulator-lab).
+## Locus integration tests
 
 The real Locus contract test is deliberately opt-in and non-mutating. It requires idle Locus,
 validates numeric recording-profile identities, and confirms that obsolete Start command `1` is
-rejected without changing recording state:
+rejected without changing recording state. Never run it when a user recording is active:
 
 ```sh
 adb connect arc
