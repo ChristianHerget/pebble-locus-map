@@ -6,6 +6,7 @@
 #include "ui_metrics.h"
 #include "watch_build_hash.auto.h"
 #include "watch_config.h"
+#include "watch_config_storage.h"
 #include "watch_maintenance.h"
 #include "watch_maintenance_timer.h"
 #include "watch_outbound_retry.h"
@@ -1136,11 +1137,13 @@ static void accept_config_chunk(DictionaryIterator *iterator) {
   int result = RESULT_CONFIG_APPLIED;
   copy_text(s_config_work, sizeof(s_config_work), s_chunks);
   const bool valid = parse_config_buffer(s_config_work, &s_parsed_config);
-  if (!valid || s_parsed_config.fingerprint_a != s_transfer_fingerprint_a ||
-      s_parsed_config.fingerprint_b != s_transfer_fingerprint_b) {
+  const WatchConfigAcceptance acceptance =
+      watch_config_classify(valid, &s_parsed_config, s_transfer_fingerprint_a,
+                            s_transfer_fingerprint_b, s_current_locus_id);
+  if (acceptance == WATCH_CONFIG_INVALID) {
     result = RESULT_INVALID_CONFIG;
     show_notice(i18n_text(I18N_INVALID_CONFIGURATION), 5);
-  } else if (strcmp(s_parsed_config.locus_id, s_current_locus_id) != 0) {
+  } else if (acceptance == WATCH_CONFIG_WRONG_LOCUS_PROFILE) {
     result = RESULT_INVALID_CONFIG;
   } else if (store_active_config(s_chunks)) {
     install_config(&s_parsed_config);
@@ -1958,14 +1961,14 @@ static bool init(void) {
   i18n_set_locale(i18n_locale(i18n_get_system_locale()));
   default_profiles();
   // Version 0.2.1 caches only the active projection; old journals and catalogs are obsolete.
-  (void)persistent_blob_delete(&s_pending_config_blob);
-  (void)persistent_blob_delete(&s_obsolete_profile_list_blob);
-  if (persistent_blob_read(&s_config_blob, s_config_work, sizeof(s_config_work))) {
-    if (parse_config_buffer(s_config_work, &s_parsed_config)) {
-      install_config(&s_parsed_config);
-    } else {
-      APP_LOG(APP_LOG_LEVEL_ERROR, "Stored configuration is invalid");
-    }
+  const PersistentBlob obsolete[] = {s_pending_config_blob, s_obsolete_profile_list_blob};
+  const WatchConfigCacheResult cached =
+      watch_config_storage_load(&s_config_blob, obsolete, sizeof(obsolete) / sizeof(obsolete[0]),
+                                s_config_work, sizeof(s_config_work), "", &s_parsed_config);
+  if (cached == WATCH_CONFIG_CACHE_LOADED) {
+    install_config(&s_parsed_config);
+  } else if (cached == WATCH_CONFIG_CACHE_INVALID) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Stored configuration is invalid");
   }
   s_session_id = create_session_id();
   s_next_command_id = 1;

@@ -1,5 +1,7 @@
 # Containerized acceptance environment
 
+For focused test selection and completion checks, see [Focused testing](testing.md).
+
 The repository includes a Docker and rootless Podman workflow for x86_64 Linux hosts with KVM. It runs
 all automated Android tests on Android 12L, API 32. API 32 is the acceptance runtime, while the
 bridge remains installable on Android 7.0 (API 24); Platform 36 remains the compile and target SDK.
@@ -166,11 +168,14 @@ not a manual-lab provisioning path.
 ## GitHub-hosted acceptance
 
 Fast CI runs `static`, documentation, and the release check on GitHub-hosted Ubuntu without KVM or
-Locus. Every pull request also runs hosted acceptance on `ubuntu-24.04` with Docker and `/dev/kvm`.
+Locus. Every pull request and push to `main` also runs hosted acceptance on `ubuntu-24.04` with
+Docker and `/dev/kvm`.
 It verifies and pulls the digest-pinned published runner and emulator, downloads the official public
 fixture only into `$RUNNER_TEMP`, builds the current TrackGlance APK/PBW, creates its golden volume
 from scratch, runs every Android/Locus instrumentation test, and runs Emery plus Gabbro acceptance
-once. The check is required before merging to `main`.
+once. The check is required before merging to `main`. The exact `main` push run certifies a tag
+build; CodeQL and dependency review remain protected pull-request gates and are not repeated
+after merge.
 
 The workflow prints `df -h`, `docker system df`, and relevant directory sizes after each major
 stage. On failure it uploads a seven-day diagnostic bundle containing only bounded logs, JUnit/XML
@@ -186,9 +191,10 @@ images, caches, and the validated golden state, then runs Android, Emery, and Ga
   --locus-apks /home/christian/.local/share/trackglance-acceptance/locus-apks
 ```
 
-Use `--fresh --cleanup` to reproduce the hosted provisioning lifecycle locally. This deliberately
-removes generated TrackGlance acceptance state, rebuilds and bootstraps from scratch, and cleans up
-again. It may need network access unless every pinned input is already cached. `--watch-passes 2`
+Use `--published --cleanup` to reproduce hosted provisioning with the signed, digest-pinned
+images. Reserve `--fresh --cleanup` for source-provisioning changes and source-versus-published
+comparisons: it removes generated acceptance state, rebuilds and bootstraps from scratch, and
+cleans up again. Either path may need network access unless every pinned input is cached. `--watch-passes 2`
 adds a second Emery/Gabbro pass for a release-candidate soak or flake investigation; it is not an
 automatic retry, and a failure in either pass fails the suite immediately.
 

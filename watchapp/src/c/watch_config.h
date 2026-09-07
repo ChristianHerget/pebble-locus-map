@@ -81,3 +81,14 @@ bool watch_config_transfer_may_start(const WatchConfigTransfer *transfer, int32_
 WatchTransferOutcome watch_config_transfer_accept(WatchConfigTransfer *transfer, char *buffer,
                                                   size_t buffer_size, int32_t id, int index,
                                                   int count, const char *data, size_t length);
+
+typedef enum {
+  WATCH_CONFIG_INVALID,
+  WATCH_CONFIG_WRONG_LOCUS_PROFILE,
+  WATCH_CONFIG_ACCEPTED,
+} WatchConfigAcceptance;
+
+// Invalid parsing or fingerprints take precedence over profile mismatch.
+WatchConfigAcceptance watch_config_classify(bool parsed, const WatchConfig *config,
+                                            uint32_t fingerprint_a, uint32_t fingerprint_b,
+                                            const char *locus_id);

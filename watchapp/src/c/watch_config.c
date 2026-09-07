@@ -467,3 +467,13 @@ WatchTransferOutcome watch_config_transfer_accept(WatchConfigTransfer *transfer,
   }
   return WATCH_TRANSFER_ACCEPTED;
 }
+
+WatchConfigAcceptance watch_config_classify(bool parsed, const WatchConfig *config,
+                                            uint32_t fingerprint_a, uint32_t fingerprint_b,
+                                            const char *locus_id) {
+  if (!parsed || config->fingerprint_a != fingerprint_a || config->fingerprint_b != fingerprint_b) {
+    return WATCH_CONFIG_INVALID;
+  }
+  if (strcmp(config->locus_id, locus_id) != 0) return WATCH_CONFIG_WRONG_LOCUS_PROFILE;
+  return WATCH_CONFIG_ACCEPTED;
+}

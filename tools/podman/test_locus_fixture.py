@@ -157,5 +157,33 @@ class PinnedMetadataTest(unittest.TestCase):
             self.assertIn("package ID", result.stderr)
 
 
+class PrivateApkFingerprintTest(unittest.TestCase):
+    def fingerprint(self, directory: Path) -> str:
+        result = subprocess.run(
+            ["python3", str(VALIDATOR), "--fingerprint-only", str(directory)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_fingerprint_is_location_independent_and_content_sensitive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            for target in (first, second):
+                (target / "base.apk").write_bytes(b"base")
+                (target / "split.apk").write_bytes(b"split")
+            original = self.fingerprint(first)
+            self.assertRegex(original, r"^[0-9a-f]{64}$")
+            self.assertEqual(original, self.fingerprint(second))
+            (second / "split.apk").write_bytes(b"changed")
+            self.assertNotEqual(original, self.fingerprint(second))
+
+
 if __name__ == "__main__":
     unittest.main()

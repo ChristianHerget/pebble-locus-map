@@ -1,5 +1,7 @@
 # End-to-end development and testing
 
+For focused test selection and completion checks, see [Focused testing](testing.md).
+
 This guide describes a version-pinned environment for building TrackGlance Bridge and testing the
 complete path from a PebbleOS watchapp to Locus Map. It records the setup that was proven on a
 Chromebook with Linux, ChromeOS ARCVM, CoreApp, and PebbleOS QEMU.
