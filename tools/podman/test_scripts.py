@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -42,6 +43,185 @@ DOCKERIGNORE = ROOT / ".dockerignore"
 VERSIONS = ROOT / "tools" / "podman" / "versions.env"
 
 
+ACTION_MAJORS = {
+    "actions/configure-pages": 6,
+    "actions/upload-pages-artifact": 5,
+    "actions/deploy-pages": 5,
+    "actions/dependency-review-action": 5,
+    "github/codeql-action/init": 4,
+    "github/codeql-action/analyze": 4,
+    "crazy-max/ghaction-virustotal": 5,
+    "actions/upload-artifact": 7,
+}
+
+
+def action_declarations(source):
+    """Read block-style uses declarations, ignoring comments and block scalar text.
+
+    This deliberately covers the repository's workflow layout, not arbitrary YAML.
+    actionlint separately validates workflow syntax.
+    """
+    block_indent = None
+    for line in source.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if block_indent is not None:
+            if indent > block_indent:
+                continue
+            block_indent = None
+        if re.match(r"^\s*(?:-\s+)?[\w-]+:\s*[|>][+-]?[1-9]?\s*(?:#.*)?$", line):
+            block_indent = indent + (2 if line.lstrip().startswith("- ") else 0)
+        declaration = re.match(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$", line)
+        if declaration:
+            yield declaration.group(1)
+
+
+def checked_action_pins(source, action):
+    """Require full SHA pins and stable release comments in the approved major.
+
+    Comments declare a release; offline checks cannot verify the action's runtime
+    or establish that the SHA belongs to the declared release.
+    """
+    pins = []
+    for declaration in action_declarations(source):
+        identity = re.split(r"[@\s#]", declaration.lstrip("\"'"), maxsplit=1)[0]
+        if identity != action:
+            continue
+        match = re.fullmatch(
+            rf"{re.escape(action)}@([0-9a-fA-F]{{40}})\s+#\s+"
+            rf"(v{ACTION_MAJORS[action]}\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
+            declaration,
+        )
+        if match is None:
+            raise AssertionError(f"Invalid pin for {action}: {declaration}")
+        pins.append(match.groups())
+    if not pins:
+        raise AssertionError(f"Missing required action: {action}")
+    return pins
+
+
+def checked_codeql_pins(source):
+    declarations = [
+        value for value in action_declarations(source)
+        if value.lstrip("\"'").startswith("github/codeql-action/")
+    ]
+    if len(declarations) != 4:
+        raise AssertionError("Expected exactly four CodeQL steps")
+    pins = []
+    for step in ("init", "analyze"):
+        step_pins = checked_action_pins(source, f"github/codeql-action/{step}")
+        if len(step_pins) != 2:
+            raise AssertionError(f"Expected two CodeQL {step} steps")
+        pins.extend(step_pins)
+    if len(set(pins)) != 1:
+        raise AssertionError("All four CodeQL steps must share the same SHA and version")
+
+
+class ActionPinPolicyTest(unittest.TestCase):
+    def test_actual_deploy_pages_5_0_1_update_is_accepted(self):
+        source = PUBLISH_RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        pin = "368f82528645a54fb793d4d04e342629a3f51346"
+        updated, count = re.subn(
+            r"actions/deploy-pages@[^\n]+",
+            f"actions/deploy-pages@{pin} # v5.0.1",
+            source,
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(checked_action_pins(updated, "actions/deploy-pages"), [(pin, "v5.0.1")])
+
+    def test_each_action_accepts_patch_and_minor_updates_and_both_step_layouts(self):
+        for action, major in ACTION_MAJORS.items():
+            for version in (f"v{major}.0.2", f"v{major}.42.0"):
+                with self.subTest(action=action, version=version):
+                    pin = f"{action}@{'aB' * 20} # {version}"
+                    source = f"      - uses: {pin}\n      - name: Example\n        uses: {pin}\n"
+                    self.assertEqual(
+                        checked_action_pins(source, action),
+                        [("aB" * 20, version)] * 2,
+                    )
+
+    def test_each_action_rejects_every_malformed_occurrence(self):
+        sha = "a" * 40
+        for action, major in ACTION_MAJORS.items():
+            invalid_pins = (
+                f"v{major}.0.0 # v{major}.0.0",
+                f"{'a' * 7} # v{major}.0.0",
+                f"{'a' * 39} # v{major}.0.0",
+                f"{'a' * 41} # v{major}.0.0",
+                f"{'g' * 40} # v{major}.0.0",
+                sha,
+                f"{sha} # v{major - 1}.0.0",
+                f"{sha} # v{major + 1}.0.0",
+                f"{sha} # v{major}",
+                f"{sha} # v{major}.0.0-rc.1",
+                f"{sha} # v{major}.01.0",
+                f"{sha} # v{major}.0.0 trailing text",
+                "",
+            )
+            valid = f"- uses: {action}@{sha} # v{major}.0.0\n"
+            for pin in invalid_pins:
+                for prefix in ("", valid):
+                    with self.subTest(action=action, pin=pin, duplicate=bool(prefix)):
+                        with self.assertRaisesRegex(AssertionError, "Invalid pin"):
+                            checked_action_pins(f"{prefix}- uses: {action}@{pin}\n", action)
+            with self.subTest(action=action, missing_ref=True):
+                with self.assertRaisesRegex(AssertionError, "Invalid pin"):
+                    checked_action_pins(f"{valid}- uses: {action}\n", action)
+
+    def test_missing_actions_cannot_be_satisfied_by_comments_strings_or_other_actions(self):
+        for action, major in ACTION_MAJORS.items():
+            pin = f"{action}@{'a' * 40} # v{major}.0.0"
+            sources = (
+                "",
+                f"# - uses: {pin}\n",
+                f"- name: uses: {pin}\n",
+                f"- uses: other/{pin}\n",
+                f"- run: |\n    uses: {pin}\n",
+                f"- name: Example\n  run: >-\n    uses: {pin}\n",
+            )
+            for source in sources:
+                with self.subTest(action=action, source=source):
+                    with self.assertRaisesRegex(AssertionError, "Missing required action"):
+                        checked_action_pins(source, action)
+
+    def test_active_declaration_after_block_scalar_is_checked(self):
+        source = (
+            "- run: |\n    uses: actions/deploy-pages@v5\n"
+            f"- uses: actions/deploy-pages@{'a' * 40} # v5.1.0\n"
+        )
+        self.assertEqual(checked_action_pins(source, "actions/deploy-pages"), [("a" * 40, "v5.1.0")])
+
+    def test_codeql_accepts_coordinated_updates(self):
+        source = CODEQL_WORKFLOW.read_text(encoding="utf-8")
+        updated, count = re.subn(
+            r"(github/codeql-action/(?:init|analyze))@[^\n]+",
+            rf"\1@{'b' * 40} # v4.42.0",
+            source,
+        )
+        self.assertEqual(count, 4)
+        checked_codeql_pins(updated)
+
+    def test_codeql_rejects_missing_extra_or_inconsistent_steps(self):
+        init = f"- uses: github/codeql-action/init@{'a' * 40} # v4.42.0\n"
+        analyze = init.replace("/init@", "/analyze@")
+        valid = init * 2 + analyze * 2
+        invalid_sources = (
+            init + analyze * 2,
+            init * 2 + analyze,
+            init * 3 + analyze,
+            valid + init,
+            valid + init.replace("/init@", "/upload-sarif@"),
+            valid.replace("a" * 40, "b" * 40, 1),
+            valid.replace("v4.42.0", "v4.42.1", 1),
+            valid.replace("a" * 40, "v4", 1),
+        )
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                with self.assertRaises(AssertionError):
+                    checked_codeql_pins(source)
+
+
 class ReleaseWorkflowTest(unittest.TestCase):
     def test_private_key_is_always_removed_before_public_processing(self):
         source = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -52,20 +232,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertLess(cleanup, stage)
         self.assertLess(stage, submission)
 
-    def test_pages_actions_use_the_node24_compatible_major_versions(self):
+    def test_pages_actions_pin_stable_releases_in_approved_majors(self):
         source = PUBLISH_RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn(
-            "actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0",
-            source,
-        )
-        self.assertIn(
-            "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0",
-            source,
-        )
-        self.assertIn(
-            "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0",
-            source,
-        )
+        for action in ("configure-pages", "upload-pages-artifact", "deploy-pages"):
+            checked_action_pins(source, f"actions/{action}")
 
     def test_virustotal_submission_is_pinned_protected_and_rate_limited(self):
         source = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -75,11 +245,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )[1].split("- name: Validate VirusTotal reports", 1)[0]
 
         self.assertIn("environment: release", build_draft)
-        self.assertIn(
-            "crazy-max/ghaction-virustotal@"
-            "936d8c5c00afe97d3d9a1af26d017cfdf26800a2 # v5.0.0",
-            submission,
-        )
+        checked_action_pins(source, "crazy-max/ghaction-virustotal")
+        checked_action_pins(submission, "crazy-max/ghaction-virustotal")
         self.assertIn("vt_api_key: ${{ secrets.VIRUSTOTAL_API_KEY }}", submission)
         self.assertEqual(submission.count("./build/release-assets/*.apk"), 1)
         self.assertEqual(submission.count("./build/release-assets/*.pbw"), 1)
@@ -194,12 +361,8 @@ class ContinuousIntegrationWorkflowTest(unittest.TestCase):
         self.assertIn("  schedule:", codeql_events)
         self.assertIn("  workflow_dispatch:", codeql_events)
 
-    def test_dependency_review_is_one_pull_request_only_node24_check(self):
+    def test_dependency_review_is_one_pull_request_only_pinned_v5_check(self):
         source = DEPENDENCY_REVIEW_WORKFLOW.read_text(encoding="utf-8")
-        expected_action = (
-            "actions/dependency-review-action@"
-            "a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"
-        )
         permissions = source.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
         job = source.split("  review:\n", 1)[1]
 
@@ -208,36 +371,15 @@ class ContinuousIntegrationWorkflowTest(unittest.TestCase):
             self.assertNotIn(unwanted_event, source)
         self.assertEqual(permissions.strip(), "contents: read")
         self.assertNotIn("write", permissions)
-        self.assertEqual(source.count("uses:"), 1)
-        self.assertEqual(source.count(expected_action), 1)
+        self.assertEqual(len(list(action_declarations(source))), 1)
+        self.assertEqual(len(checked_action_pins(source, "actions/dependency-review-action")), 1)
         self.assertIn("name: Dependency review", job)
         self.assertIn("fail-on-severity: high", job)
         self.assertIn("fail-on-scopes: runtime, development, unknown", job)
 
-    def test_codeql_actions_use_one_reviewed_v4_full_sha(self):
+    def test_codeql_actions_share_one_full_sha_and_stable_v4_release(self):
         source = CODEQL_WORKFLOW.read_text(encoding="utf-8")
-        expected_pin = (
-            "cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9"
-        )
-        action_lines = [
-            line.strip()
-            for line in source.splitlines()
-            if "uses: github/codeql-action/" in line
-        ]
-
-        self.assertEqual(len(action_lines), 4)
-        self.assertEqual(
-            action_lines.count(
-                f"uses: github/codeql-action/init@{expected_pin}"
-            ),
-            2,
-        )
-        self.assertEqual(
-            action_lines.count(
-                f"uses: github/codeql-action/analyze@{expected_pin}"
-            ),
-            2,
-        )
+        checked_codeql_pins(source)
         self.assertIn(
             "language: [c-cpp, javascript-typescript, python, actions]",
             source,
@@ -273,10 +415,7 @@ class ContinuousIntegrationWorkflowTest(unittest.TestCase):
 
     def test_failure_artifact_is_short_lived_and_binary_free_by_construction(self):
         source = CI_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
-            source,
-        )
+        checked_action_pins(source, "actions/upload-artifact")
         self.assertIn("path: build/check-logs", source)
         self.assertIn("retention-days: 7", source)
         self.assertNotIn("path: build/podman", source)
