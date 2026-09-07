@@ -23,6 +23,12 @@ project or package.
 Maintain `CHANGELOG.md` for every release with changes that matter to users. Summarize behavior,
 features, compatibility, and important fixes; do not list every build-system or maintenance change.
 
+## Agent Communication
+
+Use the installed `$write-clearly` skill for all user-facing progress updates, final responses, and
+prose artifacts. Lead with the outcome, use direct language, and preserve exact technical terms,
+commands, paths, identifiers, quotations, uncertainty, and necessary detail.
+
 ## Build, Test, and Development Commands
 
 Keep development dependencies inside the version-pinned container. Do not install the JDK, Android

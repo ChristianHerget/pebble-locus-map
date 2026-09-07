@@ -76,6 +76,31 @@ environment, then waits at the protected `release` environment. Review the live 
 approving. The final job downloads and verifies the candidate again before publishing it. It does
 not compare the reviewed tag with a later `main` HEAD.
 
+## Check output and diagnostics
+
+Development checks summarize each stage by default: status, duration, available test totals,
+warning and unfamiliar-output counts, and log locations. Active stages print a heartbeat every
+60 seconds. Gradle task counts distinguish executed, up-to-date, cached, and skipped work;
+unstarted stages are listed after a failure. JVM totals require both an executed test task and
+fresh XML reports. Missing or malformed reports do not become inferred test totals.
+
+Add `--verbose` to `static`, `documentation`, `release-check`, `android`, `acceptance` (or `e2e`),
+`acceptance-suite`, or `all` to stream complete output while retaining the same logs. For example,
+`./tools/podman-test static --verbose`. Arbitrary `dev` commands keep their original output.
+
+Each invocation retains `combined.log`, stage logs, `manifest.tsv`, refreshed reports, and separate
+emulator diagnostics under `build/check-logs/<run-id>/`. Acceptance cleanup preserves this directory.
+The manifest records log filename, stage, exit status, seconds, warnings, and unfamiliar lines.
+An otherwise successful run fails if required logs or reports cannot be retained.
+
+Failure excerpts share a 4 KiB / 60-line limit, whichever comes first, including filenames and
+truncation notices. CI uses the same renderer and persisted budget, so it does not repeat excerpts.
+Read the named stage log with `tail -n 60 build/check-logs/<run-id>/<stage>.log`, or search it with
+`rg -n -C 5 'specific diagnostic' build/check-logs/<run-id>/<stage>.log`. Read `combined.log` for the
+full command output. `tools/check-diagnostics` renders any remaining failure excerpt allowance for
+the latest invocation. CI uploads allowed diagnostics for seven days after a failure; fixtures,
+APK/PBW files, signing material, caches, and emulator state are excluded.
+
 ## Private Locus acceptance fixture
 
 On the primary development machine, keep the regular Locus Map 4 Google Play APK outside the

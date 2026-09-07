@@ -277,7 +277,7 @@ class ContinuousIntegrationWorkflowTest(unittest.TestCase):
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
             source,
         )
-        self.assertIn("path: build/acceptance-diagnostics", source)
+        self.assertIn("path: build/check-logs", source)
         self.assertIn("retention-days: 7", source)
         self.assertNotIn("path: build/podman", source)
 
@@ -940,7 +940,7 @@ class StaticPreflightTest(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--watch-passes must be 1 or 2", result.stderr)
+        self.assertIn("--watch-passes must be 1 or 2", result.stdout + result.stderr)
 
     def test_sanitized_diagnostics_allowlist_excludes_installable_binaries(self):
         source = PODMAN_TEST.read_text(encoding="utf-8")
@@ -961,16 +961,30 @@ class StaticPreflightTest(unittest.TestCase):
                 PROJECT_DIR=$DIAGNOSTICS_TEST_ROOT
                 BUILD_ROOT=$PROJECT_DIR/build/podman
                 ACCEPTANCE_DIAGNOSTICS_ROOT=$PROJECT_DIR/build/acceptance-diagnostics
+                CHECK_LOG_DIR=$PROJECT_DIR/build/check-logs/test
+                mkdir -p "$CHECK_LOG_DIR"
+                printf '%s\n' "$BUILD_ROOT/run" > "$CHECK_LOG_DIR/runs.txt"
                 mkdir -p "$BUILD_ROOT/run/results"
                 printf 'result\n' > "$BUILD_ROOT/run/results/test.xml"
                 printf 'log\n' > "$BUILD_ROOT/run/runtime.log"
                 printf 'private\n' > "$BUILD_ROOT/run/locus.apk"
                 printf 'watch\n' > "$BUILD_ROOT/run/watch.pbw"
+                mkdir -p "$BUILD_ROOT/stale" "$BUILD_ROOT/run/fixtures" "$BUILD_ROOT/run/caches"
+                printf 'stale\n' > "$BUILD_ROOT/stale/runtime.log"
+                printf 'private\n' > "$BUILD_ROOT/run/fixtures/private.xml"
+                printf 'cache\n' > "$BUILD_ROOT/run/caches/state.txt"
+                printf 'key\n' > "$BUILD_ROOT/run/key.p12"
+                ln -s "$BUILD_ROOT/run/key.p12" "$BUILD_ROOT/run/key.txt"
                 stage_acceptance_diagnostics
-                test -f "$ACCEPTANCE_DIAGNOSTICS_ROOT/run/results/test.xml"
-                test -f "$ACCEPTANCE_DIAGNOSTICS_ROOT/run/runtime.log"
-                test ! -e "$ACCEPTANCE_DIAGNOSTICS_ROOT/run/locus.apk"
-                test ! -e "$ACCEPTANCE_DIAGNOSTICS_ROOT/run/watch.pbw"
+                test -f "$CHECK_LOG_DIR/diagnostics/run/results/test.xml"
+                test -f "$CHECK_LOG_DIR/diagnostics/run/runtime.log"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/locus.apk"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/watch.pbw"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/stale"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/fixtures"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/caches"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/key.p12"
+                test ! -e "$CHECK_LOG_DIR/diagnostics/run/key.txt"
                 """
             )
             result = subprocess.run(

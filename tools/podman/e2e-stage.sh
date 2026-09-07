@@ -12,13 +12,15 @@ test -s "$bridge_apk"
 test -s "$pbw"
 
 capture_artifacts() {
+  local original_status=$? retention_status=0
   set +e
   android_screenshot "${PEBBLE_PLATFORM}-failure-android"
   dump_ui
   cp /tmp/trackglance-window.xml "/artifacts/${PEBBLE_PLATFORM}-failure-ui.xml"
   adb_device_timeout 10 shell content query --uri "$STATUS_URI" > "/artifacts/${PEBBLE_PLATFORM}-failure-status.txt"
-  adb_device_timeout 15 logcat -d > "/artifacts/${PEBBLE_PLATFORM}-logcat.txt"
-  true
+  adb_device_timeout 15 logcat -d > "/artifacts/${PEBBLE_PLATFORM}-logcat.txt" || retention_status=74
+  (( original_status != 0 )) || original_status=$retention_status
+  exit "$original_status"
 }
 trap capture_artifacts EXIT
 

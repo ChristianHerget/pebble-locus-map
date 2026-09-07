@@ -42,6 +42,17 @@ jobs:
         env:
           DEV_CONTAINER_ENGINE: docker
         run: tools/podman-test release-check
+      - name: Print bounded failure diagnostics
+        if: failure()
+        run: tools/check-diagnostics
+      - name: Upload static and release diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: static-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/check-logs
+          if-no-files-found: warn
+          retention-days: 7
 
   documentation:
     name: Committed documentation
@@ -53,6 +64,17 @@ jobs:
         env:
           DEV_CONTAINER_ENGINE: docker
         run: tools/podman-test documentation
+      - name: Print bounded failure diagnostics
+        if: failure()
+        run: tools/check-diagnostics
+      - name: Upload documentation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: documentation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/check-logs
+          if-no-files-found: warn
+          retention-days: 7
 
   acceptance-hosted:
     name: Hosted full-stack acceptance
@@ -117,17 +139,13 @@ jobs:
           esac
       - name: Print bounded failure diagnostics
         if: failure()
-        run: |
-          docker ps -a
-          find build/acceptance-diagnostics -type f -size -5M \
-            \( -name '*.log' -o -name '*.txt' -o -name '*.jsonl' -o -name '*.xml' \) \
-            -print -exec tail -n 200 {} \; 2>/dev/null || true
+        run: tools/check-diagnostics
       - name: Upload sanitized acceptance diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: acceptance-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/acceptance-diagnostics
+          path: build/check-logs
           if-no-files-found: warn
           retention-days: 7
       - name: Remove ephemeral fixture and any remaining acceptance state
