@@ -6,6 +6,7 @@ PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 source "$SCRIPT_DIR/podman/versions.env"
 source "$SCRIPT_DIR/podman/release-metadata.sh"
 source "$SCRIPT_DIR/ci-images.env"
+source "$SCRIPT_DIR/podman/check-report.sh"
 load_release_metadata "$PROJECT_DIR"
 
 BUILD_ROOT="$PROJECT_DIR/build/podman"
@@ -36,7 +37,6 @@ ACTIVE_RUNTIME_VOLUME=
 SERVICE_PID=
 SOCKET_DIR=
 LOCUS_INPUT_DIR=
-ACCEPTANCE_DIAGNOSTICS_ROOT="$PROJECT_DIR/build/acceptance-diagnostics"
 SUITE_CLEANUP_ON_EXIT=false
 MANUAL_ARTIFACTS=
 MANUAL_GOLDEN_MARKER=
@@ -72,6 +72,9 @@ Commands:
   clean                          Remove this workflow's generated state and images
 
 LOCUS_APKS_DIR may be used instead of --locus-apks.
+Checks summarize output by default. Add --verbose to static, documentation, release-check,
+android, acceptance/e2e, acceptance-suite, or all to stream full output with the same logs.
+Logs and the run manifest are retained under build/check-logs/<run-id>/.
 PLATFORM for manual must be emery or gabbro; only 127.0.0.1:5173 is published.
 Use acceptance-suite --published to provision from the verified, digest-pinned GHCR image set.
 EOF
@@ -134,7 +137,29 @@ cleanup_active() {
   fi
   set -e
 }
-trap cleanup_active EXIT INT TERM HUP
+finish_checks() {
+  local status=$?
+  local retention_status=0
+  trap - EXIT
+  if [[ "${CHECK_REPORT_ACTIVE:-}" == 1 ]]; then
+    check_result "$status"
+    check_stage cleanup
+    stage_acceptance_diagnostics || retention_status=74
+    check_diagnostic_candidates || retention_status=74
+  fi
+  cleanup_active
+  local cleanup_status=$?
+  (( cleanup_status != 0 )) || cleanup_status=$retention_status
+  if [[ "${CHECK_REPORT_ACTIVE:-}" == 1 ]]; then
+    check_result "$cleanup_status"
+  fi
+  (( status != 0 )) || status=$cleanup_status
+  exit "$status"
+}
+trap finish_checks EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 select_acceptance_engine() {
   [[ -z "$ACCEPTANCE_ENGINE" ]] || return 0
@@ -238,6 +263,9 @@ build_container_args() {
     --volume "$GRADLE_CACHE:/root/.gradle" \
     --volume "$NPM_CACHE:/root/.npm" \
     --workdir /workspace
+  if [[ -n "${CHECK_LOG_DIR:-}" ]]; then
+    printf '%s\n' --env "CHECK_LOG_DIR=/workspace/build/check-logs/${CHECK_LOG_DIR##*/}"
+  fi
   if [[ -n "${ANDROID_RELEASE_KEYSTORE_PATH:-}" ]]; then
     printf '%s\n' \
       --env ANDROID_RELEASE_KEYSTORE_PATH=/run/trackglance-release.p12 \
@@ -488,8 +516,11 @@ run_static_container() {
   fi
   local cache_root="$PROJECT_DIR/build/dev-container-cache"
   local -a signing_args=()
+  if [[ -n "${CHECK_LOG_DIR:-}" ]]; then
+    signing_args+=(--env "CHECK_LOG_DIR=/workspace/build/check-logs/${CHECK_LOG_DIR##*/}")
+  fi
   if [[ -n "${ANDROID_RELEASE_KEYSTORE_PATH:-}" ]]; then
-    signing_args=(
+    signing_args+=(
       --env ANDROID_RELEASE_KEYSTORE_PATH=/run/trackglance-release.p12
       --env ANDROID_RELEASE_KEYSTORE_PASSWORD
       --volume "$ANDROID_RELEASE_KEYSTORE_PATH:/run/trackglance-release.p12:ro"
@@ -899,6 +930,9 @@ new_run() {
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${stage}-$$"
   RUN_ARTIFACTS="$BUILD_ROOT/$RUN_ID"
   mkdir -p "$RUN_ARTIFACTS"
+  if [[ -n "${CHECK_LOG_DIR:-}" && "$stage" != static ]]; then
+    printf '%s\n' "$RUN_ARTIFACTS" >> "$CHECK_LOG_DIR/runs.txt"
+  fi
 }
 
 collect_manual_artifacts() {
@@ -1034,12 +1068,15 @@ manual_lab() {
 }
 
 static_tests() {
+  check_stage static-provisioning
   doctor_static
   static_image_exists || build_static_image
   new_run static
   set +e
   run_static_container bash -euo pipefail -c '
+    source tools/podman/check-report.sh
     mkdir -p "$HOME"
+    check_stage static-helpers
     bash -n tools/podman-test tools/podman/*.sh docs/*.sh
     actionlint .github/workflows/*.yml
     shellcheck --severity=warning tools/podman-test tools/format tools/check-format tools/check-c tools/podman/*.sh docs/*.sh
@@ -1049,18 +1086,27 @@ static_tests() {
     version_check=$(./tools/bump-version --check)
     echo "$version_check"
     tools/release-notes "${version_check##* }" >/dev/null
+    check_stage format
     ./tools/check-format
+    check_stage c-analysis
     ./tools/check-c
-    ./gradlew verifyPebbleTargets :android:app:testDebugUnitTest :android:app:lintDebug :android:app:detekt \
+    check_stage android-build-and-tests
+    python3 tools/podman/check-gradle.py ./gradlew verifyPebbleTargets :android:app:testDebugUnitTest :android:app:lintDebug :android:app:detekt \
       :android:app:assembleDebug :android:app:compileDebugAndroidTestKotlin \
       :android:app:cyclonedxDirectBom
+    check_stage watch-dependencies
     npm ci --prefix watchapp
+    check_stage watch-tests-and-lint
     npm test --prefix watchapp
     npm run lint --prefix watchapp
+    check_stage watch-build
     (cd watchapp && pebble clean && pebble build && npm run verify:pbw)
-  ' 2>&1 | tee "$RUN_ARTIFACTS/static.log"
-  local status=${PIPESTATUS[0]}
+  '
+  local status=$?
   set -e
+  check_result "$status"
+  (( status == 0 )) || return "$status"
+  check_stage static-artifacts
   [[ ! -s "$PROJECT_DIR/android/app/build/outputs/apk/debug/trackglance-bridge-debug.apk" ]] \
     || cp "$PROJECT_DIR/android/app/build/outputs/apk/debug/trackglance-bridge-debug.apk" "$RUN_ARTIFACTS/"
   [[ ! -s "$PROJECT_DIR/watchapp/build/watchapp.pbw" ]] \
@@ -1071,20 +1117,24 @@ static_tests() {
 }
 
 documentation_tests() {
+  check_stage documentation-provisioning
   doctor_static
   static_image_exists || build_static_image
+  check_stage documentation
   run_static_container bash -euo pipefail -c '
     mkdir -p "$HOME"
-    ./gradlew verifyDocumentation
+    python3 tools/podman/check-gradle.py ./gradlew verifyDocumentation
   '
 }
 
 release_check() {
+  check_stage release-provisioning
   doctor_static
   static_image_exists || build_static_image
+  check_stage release-check
   run_static_container bash -euo pipefail -c '
     mkdir -p "$HOME"
-    ./gradlew :android:app:assembleRelease
+    python3 tools/podman/check-gradle.py ./gradlew :android:app:assembleRelease
     if [[ -n "${ANDROID_RELEASE_KEYSTORE_PATH:-}" ]]; then
       release_apk=android/app/build/outputs/apk/release/trackglance-bridge-release.apk
     else
@@ -1149,6 +1199,7 @@ development_command() {
 }
 
 run_android_tests() {
+  check_stage android-provisioning
   local locus_dir=$1
   require_images
   require_current_golden "$locus_dir"
@@ -1161,17 +1212,20 @@ run_android_tests() {
   ACTIVE_POD="trackglance-${RUN_ID}"
   create_test_pod "$ACTIVE_POD"
   start_android "${ACTIVE_POD}-android" "$ACTIVE_DATA_VOLUME" "$ACTIVE_RUNTIME_VOLUME"
+  check_stage android-instrumentation
   set +e
   runner_in_pod "$RUN_ARTIFACTS" bash -euo pipefail -c '
     source /workspace/tools/podman/device-lib.sh
     capture_artifacts() {
+      local original_status=$? retention_status=0
       set +e
       adb_device_timeout 10 exec-out screencap -p > /artifacts/android-instrumentation.png
-      adb_device_timeout 15 logcat -d > /artifacts/android-logcat.txt
+      adb_device_timeout 15 logcat -d > /artifacts/android-logcat.txt || retention_status=74
       cp /workspace/android/app/build/outputs/apk/debug/trackglance-bridge-debug.apk /artifacts/
       cp /workspace/watchapp/build/watchapp.pbw /artifacts/
-      cp -a /workspace/android/app/build/outputs/androidTest-results /artifacts/
-      true
+      cp -a /workspace/android/app/build/outputs/androidTest-results /artifacts/ || retention_status=74
+      (( original_status != 0 )) || original_status=$retention_status
+      exit "$original_status"
     }
     trap capture_artifacts EXIT
     wait_for_android 180
@@ -1198,18 +1252,24 @@ run_android_tests() {
     fi
   '
   local status=$?
+  check_result "$status"
+  check_stage android-diagnostics-and-cleanup
+  local diagnostics_status=0
   acceptance_engine logs "${ACTIVE_POD}-android" \
-    > "$RUN_ARTIFACTS/android-container.log" 2>&1 || true
+    > "$RUN_ARTIFACTS/android-container.log" 2>&1 || diagnostics_status=74
   set -e
   stop_active_pod
   acceptance_engine volume rm --force "$ACTIVE_DATA_VOLUME" "$ACTIVE_RUNTIME_VOLUME" >/dev/null
   ACTIVE_DATA_VOLUME=
   ACTIVE_RUNTIME_VOLUME=
+  check_result "$diagnostics_status"
+  (( status != 0 )) || status=$diagnostics_status
   return "$status"
 }
 
 run_e2e_platform() {
   local platform=$1 artifacts=$2
+  check_stage "${platform}-provisioning"
   ACTIVE_DATA_VOLUME="trackglance-${RUN_ID}-${platform}-android"
   ACTIVE_WATCH_VOLUME="trackglance-${RUN_ID}-${platform}-watch"
   ACTIVE_RUNTIME_VOLUME="trackglance-${RUN_ID}-${platform}-runtime"
@@ -1232,14 +1292,18 @@ run_e2e_platform() {
     --entrypoint /workspace/tools/podman/watch-qemu-entrypoint.sh \
     "$BUILD_IMAGE" >/dev/null
   register_active_container "${ACTIVE_POD}-watch"
+  check_stage "${platform}-acceptance"
   set +e
   runner_in_pod "$artifacts" env PEBBLE_PLATFORM="$platform" \
     bash /workspace/tools/podman/e2e-stage.sh
   local status=$?
+  check_result "$status"
+  check_stage "${platform}-diagnostics-and-cleanup"
+  local diagnostics_status=0
   acceptance_engine logs "${ACTIVE_POD}-android" \
-    > "$artifacts/${platform}-android-container.log" 2>&1 || true
+    > "$artifacts/${platform}-android-container.log" 2>&1 || diagnostics_status=74
   acceptance_engine logs "${ACTIVE_POD}-watch" \
-    > "$artifacts/${platform}-watch-container.log" 2>&1 || true
+    > "$artifacts/${platform}-watch-container.log" 2>&1 || diagnostics_status=74
   set -e
   stop_active_pod
   acceptance_engine volume rm --force \
@@ -1247,10 +1311,13 @@ run_e2e_platform() {
   ACTIVE_DATA_VOLUME=
   ACTIVE_WATCH_VOLUME=
   ACTIVE_RUNTIME_VOLUME=
+  check_result "$diagnostics_status"
+  (( status != 0 )) || status=$diagnostics_status
   return "$status"
 }
 
 e2e_tests() {
+  check_stage watch-provisioning
   local locus_dir=$1
   require_images
   require_current_golden "$locus_dir"
@@ -1270,22 +1337,27 @@ all_tests() {
 }
 
 stage_acceptance_diagnostics() {
-  local destination=$ACCEPTANCE_DIAGNOSTICS_ROOT file relative
-  mkdir -p "$destination"
-  [[ "$destination" == "$PROJECT_DIR/build/acceptance-diagnostics" ]] \
-    || die "Refusing unexpected diagnostics path."
-  find "$destination" -mindepth 1 -delete
+  [[ -n "${CHECK_LOG_DIR:-}" && -f "$CHECK_LOG_DIR/runs.txt" ]] || return 0
+  local destination=$CHECK_LOG_DIR/diagnostics file relative run
+  local file_list=$CHECK_LOG_DIR/staging-files.txt
+  mkdir -p "$destination" || return 74
   [[ -d "$BUILD_ROOT" ]] || return 0
-  while IFS= read -r -d '' file; do
-    relative=${file#"$BUILD_ROOT"/}
-    mkdir -p "$destination/$(dirname "$relative")"
-    cp "$file" "$destination/$relative"
-  done < <(
-    find "$BUILD_ROOT" \
-      \( -path "$BUILD_ROOT/generated" -o -path '*/compose_metrics' \) -prune -o -type f \
+  while IFS= read -r run; do
+    [[ "$run" == "$BUILD_ROOT/"* && -d "$run" ]] || continue
+    find "$run" \
+      \( -path "$BUILD_ROOT/generated" -o -path '*/compose_metrics' \
+         -o -name fixtures -o -name locus-apks -o -name caches -o -name emulator-state \
+         -o -name signing -o -name private -o -name cache \
+         -o -name .gradle -o -name .npm \) -prune -o -type f \
       \( -name '*.log' -o -name '*.txt' -o -name '*.jsonl' -o -name '*.xml' \
-         -o -name '*.png' -o -name '*.ppm' \) -print0
-  )
+         -o -name '*.png' -o -name '*.ppm' \) -print0 > "$file_list" || return 74
+    while IFS= read -r -d '' file; do
+      relative=${file#"$BUILD_ROOT"/}
+      mkdir -p "$destination/$(dirname "$relative")" || return 74
+      cp "$file" "$destination/$relative" || return 74
+    done < "$file_list"
+  done < "$CHECK_LOG_DIR/runs.txt"
+  rm -f "$file_list" || return 74
   if find "$destination" -type f \
     \( -name '*.apk' -o -name '*.pbw' -o -name '*.p12' -o -name '*.keystore' \) \
     -print -quit | grep -q .; then
@@ -1348,6 +1420,10 @@ acceptance_suite() {
   done
   [[ "$watch_passes" == 1 || "$watch_passes" == 2 ]] \
     || die "--watch-passes must be 1 or 2"
+  check_plan android-instrumentation
+  for ((pass=1; pass <= watch_passes; pass++)); do
+    check_plan "emery-acceptance-pass-$pass" "gabbro-acceptance-pass-$pass"
+  done
   parse_locus_apk_options "${locus_options[@]}"
   local locus_dir=$LOCUS_INPUT_DIR
   export LOCUS_APKS_DIR=$locus_dir
@@ -1356,6 +1432,7 @@ acceptance_suite() {
   set +e
   (
     set -e
+    check_stage suite-provisioning
     if [[ "$published" == true ]]; then
       clean
       prepare_published_acceptance_images
@@ -1372,6 +1449,7 @@ acceptance_suite() {
     assert_no_active_acceptance_runtime
     report_acceptance_resources
     for ((pass=1; pass <= watch_passes; pass++)); do
+      export CHECK_PASS=$pass
       echo "Running Emery and Gabbro acceptance pass $pass of $watch_passes."
       e2e_tests "$locus_dir"
       assert_no_active_acceptance_runtime
@@ -1380,16 +1458,23 @@ acceptance_suite() {
   )
   status=$?
   set -e
+  check_result "$status"
 
-  if (( status != 0 )); then
-    stage_acceptance_diagnostics
+  if (( status != 0 )) || [[ "$cleanup" == true ]]; then
+    check_stage diagnostic-staging
+    local staging_status=0
+    stage_acceptance_diagnostics || staging_status=74
+    check_result "$staging_status"
+    (( status != 0 )) || status=$staging_status
   fi
   if [[ "$cleanup" == true ]]; then
+    check_stage suite-cleanup
     SUITE_CLEANUP_ON_EXIT=false
     set +e
     clean
     cleanup_status=$?
     set -e
+    check_result "$cleanup_status"
     (( status != 0 )) || status=$cleanup_status
   fi
   return "$status"
@@ -1458,6 +1543,39 @@ main() {
   local command=${1:-}
   [[ -n "$command" ]] || { usage; return 2; }
   shift
+  case "$command" in
+    static|documentation|release-check|android|acceptance|e2e|acceptance-suite|all)
+      local -a options=()
+      local option
+      for option in "$@"; do
+        if [[ "$option" == --verbose ]]; then
+          export CHECK_VERBOSE=true
+        else
+          options+=("$option")
+        fi
+      done
+      set -- "${options[@]}"
+      if [[ "${CHECK_REPORT_ACTIVE:-}" != 1 ]]; then
+        exec bash "$SCRIPT_DIR/podman/check-report.sh" "$PROJECT_DIR" \
+          bash "$SCRIPT_DIR/podman-test" "$command" "$@"
+      fi
+      check_stage startup
+      case "$command" in
+        static|all)
+          check_plan static-helpers format c-analysis android-build-and-tests \
+            watch-dependencies watch-tests-and-lint watch-build static-artifacts
+          ;;
+        documentation) check_plan documentation ;;
+        release-check) check_plan release-check ;;
+      esac
+      case "$command" in
+        android|all) check_plan android-instrumentation ;;
+      esac
+      case "$command" in
+        acceptance|e2e|all) check_plan emery-acceptance gabbro-acceptance ;;
+      esac
+      ;;
+  esac
   case "$command" in
     doctor) [[ $# -eq 1 ]] || die "doctor requires static or acceptance"; doctor "$1" ;;
     build)

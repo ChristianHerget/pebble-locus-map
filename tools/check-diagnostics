@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+# Local reporting records budget consumption, so CI cannot repeat that excerpt.
+if [[ $# -gt 0 ]]; then
+  directory=$1
+else
+  [[ -f "$root/build/check-logs/latest" ]] || exit 0
+  read -r directory < "$root/build/check-logs/latest"
+fi
+LC_ALL=C awk -v directory="$directory" -v replay=1 -f "$root/tools/podman/check-report.awk"
